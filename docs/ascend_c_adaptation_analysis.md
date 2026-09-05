@@ -147,10 +147,9 @@ Code-generation stages:
   offload.
 - `requirements.txt`: torch≥2.0, transformers≥4.36, vllm≥0.4, deepspeed≥0.12,
   tree-sitter + tree-sitter-python, pyext.
-- **Known bugs:** `scripts/train_contrastive.sh:14` and `train_soft_prompt.sh:12`
-  invoke bare filenames (`train_contrastive.py`) that actually live in
-  `domino/contrastive/` / `domino/soft_prompt/`; pipeline scripts must be run from
-  the repo root. Fix paths when adapting scripts.
+- `scripts/train_contrastive.sh` and `scripts/train_soft_prompt.sh` now call
+  `../domino/contrastive/train.py` and `../domino/soft_prompt/train.py`; pipeline
+  scripts must still be run from the repo root.
 - The MAGPIE baseline (`domino/baselines/magpie/`) requires cloning the external repo
   and patching `exp/gen_ins.py`; its prompt templates are Python-centric.
 

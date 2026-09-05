@@ -143,7 +143,7 @@ There is **no test suite and no CI** in this repository — do not look for pyte
 
 ## Known Gotchas
 
-- `scripts/train_contrastive.sh` and `scripts/train_soft_prompt.sh` invoke `train_contrastive.py` / `train_soft_prompt.py` as bare filenames from the `scripts/` directory, but those files actually live in `domino/contrastive/` and `domino/soft_prompt/`. Copy/symlink them or adjust the path when adapting the scripts.
+- `scripts/train_contrastive.sh` and `scripts/train_soft_prompt.sh` now call `../domino/contrastive/train.py` and `../domino/soft_prompt/train.py`; run them from the `scripts/` directory (the DeepSpeed config path is `../configs/...`).
 - Pipeline scripts mix `python -m domino...` (requires repo root on `PYTHONPATH`) with relative `./outputs` paths — run them from the repository root.
 - `domino/pipeline/code_execution/check_correctness.py` is incomplete (references an undefined `synthetic_path` at module function scope and lacks a CLI); treat it as a work-in-progress snippet.
 - The MAGPIE baseline under `domino/baselines/magpie/` is not self-contained: it requires cloning the external `magpie-align/magpie` repo and patching its `exp/gen_ins.py` (see that directory's README).

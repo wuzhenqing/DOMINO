@@ -7,9 +7,14 @@ class PublicPrivateContrastiveModel(torch.nn.Module):
     """
     domain & sample level soft token under contrastive learning.
     """
-    def __init__(self, pretrained_model_name, public_soft_token_count, private_soft_token_count, domain_samples):
+    def __init__(self, pretrained_model_name, public_soft_token_count, private_soft_token_count, domain_samples, attn_implementation="sdpa"):
         super().__init__()
-        self.pretrained_llm = AutoModelForCausalLM.from_pretrained(pretrained_model_name, trust_remote_code=True)
+        self.pretrained_llm = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name,
+            trust_remote_code=True,
+            attn_implementation=attn_implementation,
+            local_files_only=True,
+        )
 
         for param in self.pretrained_llm.parameters():
             param.requires_grad = False
@@ -25,12 +30,14 @@ class PublicPrivateContrastiveModel(torch.nn.Module):
         # Sample level soft tokens
         self.private_soft_tokens_embeddings = torch.nn.Embedding(self.domain_samples, self.private_soft_token_count * self.hidden_size)
 
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, **kwargs):
         """
         gradient checkpointing
         """
-        if gradient_checkpointing_kwargs:
-            self.pretrained_llm.gradient_checkpointing_enable(**gradient_checkpointing_kwargs)
+        merged_kwargs = dict(gradient_checkpointing_kwargs or {})
+        merged_kwargs.update(kwargs)
+        if merged_kwargs:
+            self.pretrained_llm.gradient_checkpointing_enable(**merged_kwargs)
         else:
             self.pretrained_llm.gradient_checkpointing_enable()
 
@@ -60,7 +67,6 @@ class PublicPrivateContrastiveModel(torch.nn.Module):
             "loss": contrastive_loss,
             "loss_public_only": loss_public_only.mean(),
             "loss_public_private": loss_public_private.mean(),
-            "denominator_matrix": denominator_matrix
         }
 
     def _compute_losses(self, inputs_embeds, attention_mask, public_soft_token_embeds, private_soft_token_embeds, input_ids, sample_idx):
@@ -77,6 +83,7 @@ class PublicPrivateContrastiveModel(torch.nn.Module):
             labels=labels_public
         )
         loss_public_only = outputs_public.loss
+        del outputs_public
 
         # --- Compute CE loss with public + private soft tokens ---
         inputs_embeds_public_private = torch.cat([public_soft_token_embeds, private_soft_token_embeds, inputs_embeds], dim=1)
@@ -89,6 +96,7 @@ class PublicPrivateContrastiveModel(torch.nn.Module):
             labels=labels_public_private
         )
         loss_public_private = outputs_public_private.loss
+        del outputs_public_private
 
         # --- Compute denominator (sum of CE losses for all other samples) ---
         denominator_matrix = torch.zeros((batch_size, batch_size), device=inputs_embeds.device)

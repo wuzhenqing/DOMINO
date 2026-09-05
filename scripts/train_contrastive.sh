@@ -11,10 +11,10 @@ PUBLIC_SOFT_TOKEN_COUNT=256
 PRIVATE_SOFT_TOKEN_COUNT=256
 EPOCH=10
 
-deepspeed --master_port 1113 --include localhost:0 train_contrastive.py \
+deepspeed --master_port 1113 --include localhost:0 ../domino/contrastive/train.py \
     --model_name_or_path "${LLM_MODEL}" \
     --use_fast_tokenizer True \
-    --use_flash_attn True \
+    --use_flash_attn False \
     --train_data_path "${TRAIN_DATA}" \
     --valid_data_path "${VALID_DATA}" \
     --save_strategy "no" \

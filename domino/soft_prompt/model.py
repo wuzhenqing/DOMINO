@@ -7,10 +7,10 @@ class PromptTuningModel(torch.nn.Module):
     Shared soft tokens across all samples.
     Task-level prompt tuning.
     """
-    def __init__(self, pretrained_model_name, soft_token_count):
+    def __init__(self, pretrained_model_name, soft_token_count, attn_implementation="sdpa"):
         super().__init__()
         self.pretrained_llm = AutoModelForCausalLM.from_pretrained(pretrained_model_name,
-        attn_implementation="flash_attention_2", use_cache=False, trust_remote_code=True, torch_dtype=torch.bfloat16)
+        attn_implementation=attn_implementation, use_cache=False, trust_remote_code=True, torch_dtype=torch.bfloat16)
         
         self.config = self.pretrained_llm.config
 

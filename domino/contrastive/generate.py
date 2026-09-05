@@ -13,13 +13,14 @@ def generate_sample_with_transformers(
     public_soft_token_count,
     temp,
     target_count,
+    max_tokens,
     device,
 ):
-    pre_trained_llm = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path)
+    pre_trained_llm = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, local_files_only=True)
     pre_trained_llm.to(device)
     pre_trained_llm.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, local_files_only=True)
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
         
@@ -27,7 +28,7 @@ def generate_sample_with_transformers(
     public_soft_token_embeddings_state_dict = torch.load(public_soft_token_embeddings_path, map_location=device)  
     public_soft_tokens_embeddings = torch.nn.Embedding(public_soft_token_count, pre_trained_llm.config.hidden_size)
     public_soft_tokens_embeddings.load_state_dict(public_soft_token_embeddings_state_dict)
-    public_soft_tokens_embeddings.to(device).eval()
+    public_soft_tokens_embeddings.to(device).to(pre_trained_llm.dtype).eval()
 
     soft_token_id = torch.arange(public_soft_token_count).to(device)
     public_soft_token_embeds = public_soft_tokens_embeddings(soft_token_id)
@@ -42,9 +43,9 @@ def generate_sample_with_transformers(
             generated_outputs = pre_trained_llm.generate(
                 inputs_embeds=public_soft_token_embeds,
                 attention_mask=soft_attention_mask,
-                max_new_tokens=2048,  
-                do_sample=True,      
-                temperature=temp,      
+                max_new_tokens=max_tokens,
+                do_sample=True,
+                temperature=temp,
                 use_cache=False,
                 eos_token_id=[tokenizer.eos_token_id, tokenizer.pad_token_id],
                 pad_token_id=tokenizer.pad_token_id,
@@ -73,12 +74,15 @@ def generate_sample_with_vllm(
     public_soft_token_count,
     temp,
     target_count,
+    max_tokens,
     batch_size,
     tensor_parallel_size,
+    gpu_memory_utilization,
+    max_model_len,
     device='cuda:0'
 ):
-    pretrained_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+    pretrained_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True, local_files_only=True)
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
@@ -86,7 +90,7 @@ def generate_sample_with_vllm(
     soft_token_embeddings_state_dict = torch.load(soft_token_embeddings_path, map_location=device)  
     soft_tokens_embeddings = torch.nn.Embedding(public_soft_token_count, pretrained_model.config.hidden_size)
     soft_tokens_embeddings.load_state_dict(soft_token_embeddings_state_dict)
-    soft_tokens_embeddings.to(device)
+    soft_tokens_embeddings.to(device).to(pretrained_model.dtype)
     soft_tokens_embeddings.eval()
 
     new_tokens = [f"<soft_{i}>" for i in range(public_soft_token_count)]
@@ -96,16 +100,34 @@ def generate_sample_with_vllm(
     with torch.no_grad():
         pretrained_model.get_input_embeddings().weight[-public_soft_token_count:] = soft_tokens_embeddings.weight.data
 
-    temp_dir = os.path.join(soft_prompt_dir, "vllm_temp_model")
-    if not os.path.exists(temp_dir) or not os.path.exists(os.path.join(temp_dir, "config.json")):
-        print("save vllm temp model...")
-        pretrained_model.save_pretrained(temp_dir)
-        tokenizer.save_pretrained(temp_dir)
-        print("save vllm temp model done!")
-    else:
-        print(f"{temp_dir} already exists and contains model files. Skipping save.")
+    # Prevent soft-token IDs from being emitted as output.
+    # Qwen2.5 ties input/output embeddings; materialize a separate lm_head
+    # and set the soft-token rows to a large negative logit.
+    pretrained_model.config.tie_word_embeddings = False
+    new_lm_head = torch.nn.Linear(
+        pretrained_model.config.hidden_size,
+        len(tokenizer),
+        bias=False,
+        device=pretrained_model.device,
+        dtype=pretrained_model.dtype,
+    )
+    new_lm_head.weight.data.copy_(pretrained_model.get_input_embeddings().weight.data)
+    with torch.no_grad():
+        new_lm_head.weight[-public_soft_token_count:] = -1e4
+    pretrained_model.lm_head = new_lm_head
 
-    torch.cuda.empty_cache()
+    temp_dir = os.path.join(soft_prompt_dir, "vllm_temp_model")
+    print("save vllm temp model...")
+    # Always overwrite so that embedding-injection fixes take effect.
+    if os.path.exists(temp_dir):
+        import shutil
+        shutil.rmtree(temp_dir)
+    pretrained_model.save_pretrained(temp_dir)
+    tokenizer.save_pretrained(temp_dir)
+    print("save vllm temp model done!")
+
+    if str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
     del pretrained_model  
     
     llm = LLM(
@@ -113,12 +135,13 @@ def generate_sample_with_vllm(
         tokenizer=temp_dir,
         dtype='bfloat16',
         tensor_parallel_size=tensor_parallel_size,
-        gpu_memory_utilization=0.95,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
         trust_remote_code=True
     )
 
     sampling_params = SamplingParams(
-        max_tokens=2048,
+        max_tokens=max_tokens,
         temperature=temp,
         top_p=1,
         repetition_penalty=1.0,
@@ -152,7 +175,11 @@ if __name__ == "__main__":
     parser.add_argument("--public_soft_token_count", type=int, default=256)
     parser.add_argument("--temp", type=float, default=0.8)
     parser.add_argument("--target_count", type=int, default=200)
-    parser.add_argument("--tensor_parallel_size", type=int, default=4)
+    parser.add_argument("--max_tokens", type=int, default=4096)
+    parser.add_argument("--batch_size", type=int, default=50)
+    parser.add_argument("--tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.85)
+    parser.add_argument("--max_model_len", type=int, default=4608)
     parser.add_argument("--device", type=str, default="cuda:0")
 
     args = parser.parse_args()
@@ -165,6 +192,7 @@ if __name__ == "__main__":
             public_soft_token_count=args.public_soft_token_count,
             temp=args.temp,
             target_count=args.target_count,
+            max_tokens=args.max_tokens,
             device=args.device
         )
     else:
@@ -175,7 +203,10 @@ if __name__ == "__main__":
             public_soft_token_count=args.public_soft_token_count,
             temp=args.temp,
             target_count=args.target_count,
-            batch_size=200,
+            max_tokens=args.max_tokens,
+            batch_size=args.batch_size,
             tensor_parallel_size=args.tensor_parallel_size,
-            device=args.device 
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
+            device=args.device
         )

@@ -10,14 +10,32 @@ from transformers import (
     HfArgumentParser,
     set_seed,
     DataCollatorWithPadding,
-    DataCollatorForSeq2Seq
 )
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from .model import PublicPrivateContrastiveModel
 from .dataset import SoftDataset
 
 logger = logging.getLogger(__name__)
+
+
+class SoftPromptDataCollator:
+    """Pad input_ids/attention_mask and keep sample_idx for contrastive training."""
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        input_ids = [f["input_ids"] for f in features]
+        attention_mask = [f["attention_mask"] for f in features]
+        sample_idx = torch.tensor([f["sample_idx"] for f in features], dtype=torch.long)
+
+        batch = self.tokenizer.pad(
+            {"input_ids": input_ids, "attention_mask": attention_mask},
+            padding=True,
+            return_tensors="pt",
+        )
+        batch["sample_idx"] = sample_idx
+        return batch
 
 @dataclass
 class ModelArguments:
@@ -29,8 +47,8 @@ class ModelArguments:
         metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
     )
     use_flash_attn: Optional[bool] = field(
-        default=True,
-        metadata={"help": "Enables Flash attention for training."},
+        default=False,
+        metadata={"help": "Enables Flash attention for training (uses sdpa when False)."},
     )
 
 @dataclass
@@ -83,7 +101,12 @@ def main():
         + f"distributed training: {training_args.parallel_mode.value == 'distributed'}, bfloat16: {training_args.bf16}, eval_strategy: {training_args.eval_strategy}"
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, use_fast=model_args.use_fast_tokenizer, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_args.model_name_or_path,
+        use_fast=model_args.use_fast_tokenizer,
+        trust_remote_code=True,
+        local_files_only=True,
+    )
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "right"
@@ -101,10 +124,12 @@ def main():
     print(f"sample [0] = {train_dataset[0]}")
     print(f"sample[0] input id decoder = {tokenizer.decode(train_dataset[0]['input_ids'])}")
 
+    attn_implementation = "flash_attention_2" if model_args.use_flash_attn else "sdpa"
     model = PublicPrivateContrastiveModel(model_args.model_name_or_path, 
                                           public_soft_token_count=data_args.public_soft_token_count,
                                           private_soft_token_count=data_args.private_soft_token_count,
-                                          domain_samples=domain_samples)
+                                          domain_samples=domain_samples,
+                                          attn_implementation=attn_implementation)
                                         
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable() 
@@ -117,7 +142,7 @@ def main():
     logger.info(f"Trainable%: {100 * trainable_params / total_params:.2f}%")
     logger.info("=" * 80)
 
-    data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True)
+    data_collator = SoftPromptDataCollator(tokenizer=tokenizer)
 
     trainer = Trainer(
         model=model,

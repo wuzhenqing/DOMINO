@@ -15,11 +15,11 @@ def generate_sample_with_transformers(
     target_count,
     device='cuda:0',
 ):
-    pre_trained_llm = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
+    pre_trained_llm = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True, local_files_only=True)
     pre_trained_llm.to(device)
     pre_trained_llm.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, local_files_only=True)
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
@@ -74,8 +74,8 @@ def generate_sample_with_vllm(
     tensor_parallel_size,
     device='cuda:0',
 ):
-    pretrained_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True)
+    pretrained_model = AutoModelForCausalLM.from_pretrained(pretrained_model_name_or_path, trust_remote_code=True, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True, local_files_only=True)
     if not tokenizer.pad_token_id:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     
@@ -93,16 +93,34 @@ def generate_sample_with_vllm(
     with torch.no_grad():
         pretrained_model.get_input_embeddings().weight[-soft_token_count:] = soft_tokens_embeddings.weight.data
 
-    temp_dir = os.path.join(soft_prompt_dir, "vllm_temp_model")
-    if not os.path.exists(temp_dir) or not os.path.exists(os.path.join(temp_dir, "config.json")):
-        print("Save vllm temp model...")
-        pretrained_model.save_pretrained(temp_dir)
-        tokenizer.save_pretrained(temp_dir)
-        print("Save vllm temp model done!")
-    else:
-        print(f"{temp_dir} already exists and contains model files. Skipping save.")
+    # Prevent soft-token IDs from being emitted as output.
+    # Qwen2.5 ties input/output embeddings; materialize a separate lm_head
+    # and set the soft-token rows to a large negative logit.
+    pretrained_model.config.tie_word_embeddings = False
+    new_lm_head = torch.nn.Linear(
+        pretrained_model.config.hidden_size,
+        len(tokenizer),
+        bias=False,
+        device=pretrained_model.device,
+        dtype=pretrained_model.dtype,
+    )
+    new_lm_head.weight.data.copy_(pretrained_model.get_input_embeddings().weight.data)
+    with torch.no_grad():
+        new_lm_head.weight[-soft_token_count:] = -1e4
+    pretrained_model.lm_head = new_lm_head
 
-    torch.cuda.empty_cache()
+    temp_dir = os.path.join(soft_prompt_dir, "vllm_temp_model")
+    print("Save vllm temp model...")
+    # Always overwrite so that embedding-injection fixes take effect.
+    if os.path.exists(temp_dir):
+        import shutil
+        shutil.rmtree(temp_dir)
+    pretrained_model.save_pretrained(temp_dir)
+    tokenizer.save_pretrained(temp_dir)
+    print("Save vllm temp model done!")
+
+    if str(device).startswith("cuda"):
+        torch.cuda.empty_cache()
     del pretrained_model  
 
     llm = LLM(
@@ -151,7 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--temp", type=float, default=0.8)
     parser.add_argument("--target_count", type=int, default=400)
     parser.add_argument("--tensor_parallel_size", type=int, default=4)
-    parser.add_argument("--device", default=torch.device("cuda:0"))
+    parser.add_argument("--device", type=str, default="cuda:0")
 
     args = parser.parse_args()
 

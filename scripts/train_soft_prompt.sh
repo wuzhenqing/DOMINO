@@ -9,10 +9,10 @@ OUTPUT_DIR="./outputs/soft_prompt"
 SOFT_TOKEN_COUNT=256
 EPOCH=10
 
-deepspeed --master_port 1114 --include localhost:0 train_soft_prompt.py \
+deepspeed --master_port 1114 --include localhost:0 ../domino/soft_prompt/train.py \
     --model_name_or_path "${LLM_MODEL}" \
     --use_fast_tokenizer True \
-    --use_flash_attn True \
+    --use_flash_attn False \
     --train_data_path "${TRAIN_DATA}" \
     --valid_data_path "${VALID_DATA}" \
     --max_seq_len 1024 \

@@ -28,8 +28,8 @@ class ModelArguments:
         metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
     )
     use_flash_attn: Optional[bool] = field(
-        default=True,
-        metadata={"help": "Enables Flash attention for training."},
+        default=False,
+        metadata={"help": "Enables Flash attention for training (uses sdpa when False)."},
     )
 
 @dataclass
@@ -95,7 +95,8 @@ def main():
     logger.info(f"Sample 0: {train_dataset[0]}")
     logger.info(f"Sample 0 input: {tokenizer.decode(train_dataset[0]['input_ids'])}")
 
-    model = PromptTuningModel(model_args.model_name_or_path, soft_token_count=data_args.soft_token_count)
+    attn_implementation = "flash_attention_2" if model_args.use_flash_attn else "sdpa"
+    model = PromptTuningModel(model_args.model_name_or_path, soft_token_count=data_args.soft_token_count, attn_implementation=attn_implementation)
     
     if training_args.gradient_checkpointing:
         model.gradient_checkpointing_enable() 
